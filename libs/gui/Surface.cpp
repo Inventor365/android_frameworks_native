@@ -2768,13 +2768,6 @@ int Surface::setMaxDequeuedBufferCount(int maxDequeuedBuffers) {
     SURF_LOGV("Surface::setMaxDequeuedBufferCount");
     Mutex::Autolock lock(mMutex);
 
-    if (maxDequeuedBuffers > BufferQueueDefs::NUM_BUFFER_SLOTS && !mIsSlotExpansionAllowed) {
-        SURF_LOGE("setMaxDequeuedBufferCount: maxDequeuedBuffers (%d) > NUM_BUFFER_SLOTS (%d) and "
-                  "slot expansion is not allowed",
-                  maxDequeuedBuffers, BufferQueueDefs::NUM_BUFFER_SLOTS);
-        return BAD_VALUE;
-    }
-
     int minUndequeuedBuffers = 0;
     status_t err = mGraphicBufferProducer->query(NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS,
                                                  &minUndequeuedBuffers);
@@ -2785,7 +2778,7 @@ int Surface::setMaxDequeuedBufferCount(int maxDequeuedBuffers) {
     }
 
     int newSlotCount = minUndequeuedBuffers + maxDequeuedBuffers;
-    if (newSlotCount > (int)mSlots.size()) {
+    if (mIsSlotExpansionAllowed && newSlotCount > (int)mSlots.size()) {
         err = mGraphicBufferProducer->extendSlotCount(newSlotCount);
         if (err != OK) {
             SURF_LOGE("IGraphicBufferProducer::extendSlotCount(%d) returned %s", newSlotCount,
