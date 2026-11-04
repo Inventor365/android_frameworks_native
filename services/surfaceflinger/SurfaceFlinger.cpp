@@ -19,7 +19,7 @@
  *
 // QTI_END: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
 // QTI_BEGIN: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
- * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // QTI_END: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
 // QTI_BEGIN: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
  * SPDX-License-Identifier: BSD-3-Clause-Clear
@@ -3904,10 +3904,16 @@ void SurfaceFlinger::setForcedClientCompositionLayerStacks(
     bool forceAllDisplaysToClientComposition = false;
     if (mDebugDisableHWC) {
         forceAllDisplaysToClientComposition = true;
+        // QTI_BEGIN
+        refreshArgs.mQtiEnforceGpuComp = true;
+        // QTI_END
     }
 
     if (mDebugFlashDelay != 0) {
         forceAllDisplaysToClientComposition = true;
+        // QTI_BEGIN
+        refreshArgs.mQtiEnforceGpuComp = true;
+        // QTI_END
         refreshArgs.devOptFlashDirtyRegionsDelay = std::chrono::milliseconds(mDebugFlashDelay);
     }
 
@@ -3954,8 +3960,12 @@ bool SurfaceFlinger::isHdrLayer(const frontend::LayerSnapshot& snapshot) const {
             ? std::make_optional(static_cast<ui::PixelFormat>(snapshot.buffer->getPixelFormat()))
             : std::nullopt;
 
-    if (getHdrRenderType(snapshot.dataspace, pixelFormat, snapshot.desiredHdrSdrRatio) !=
-        HdrRenderType::SDR) {
+    ftl::Flags<HdrMetadataOptions> hdrOptions;
+    if (snapshot.hdrMetadata.validTypes != 0) hdrOptions |= HdrMetadataOptions::HasHdrMetadata;
+    if (snapshot.agtm.has_value()) hdrOptions |= HdrMetadataOptions::HasSmpte2094_50;
+
+    if (getHdrRenderType(snapshot.dataspace, pixelFormat, snapshot.desiredHdrSdrRatio,
+                         hdrOptions) != HdrRenderType::SDR) {
         return true;
     }
     // If the layer is not allowed to be dimmed, treat it as HDR. WindowManager may disable
@@ -4142,6 +4152,15 @@ void SurfaceFlinger::onCompositionPresented(PhysicalDisplayId pacesetterId,
 
         std::swap(activePictureListenersToAdd, mActivePictureListenersToAdd);
         std::swap(activePictureListenersToRemove, mActivePictureListenersToRemove);
+    }
+
+    if (!mHdrLayerInfoChanged) {
+        mLayerSnapshotBuilder.forEachVisibleSnapshot(
+                [&](std::unique_ptr<frontend::LayerSnapshot>& snapshot) {
+                    if (snapshot->agtm.has_value()) {
+                        mHdrLayerInfoChanged = true;
+                    }
+                });
     }
 
     if (haveNewHdrInfoListeners || mHdrLayerInfoChanged) {
@@ -10155,7 +10174,10 @@ std::vector<std::pair<Layer*, LayerFE*>> SurfaceFlinger::addLayerSnapshotsToComp
 // QTI_END: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
 // QTI_BEGIN: 2025-01-07: Display: sf: Update LayerFE's composition state before composition
                 snapshot->qtiIsSecureDisplay =  legacyLayer->qtiIsSecureDisplay();
-                snapshot->qtiIsSecureCamera = legacyLayer->qtiIsSecureCamera();
+                snapshot->qtiIsSecureCamera = (snapshot->externalTexture != nullptr)
+                        ? mQtiSFExtnIntf->qtiIsSecureCamera(
+                                  snapshot->externalTexture->getBuffer())
+                        : legacyLayer->qtiIsSecureCamera();
 // QTI_END: 2025-01-07: Display: sf: Update LayerFE's composition state before composition
                 layerFE->mSnapshot = std::move(snapshot);
                 refreshArgs.layers.push_back(layerFE);
