@@ -81,6 +81,9 @@ private:
     std::shared_ptr<AutoBackendTexture::LocalRef> mProtectedTextures[kMaxSurfaces];
     ui::Size mUnprotectedDisplaySize;
     ui::Size mProtectedDisplaySize;
+    // Blur surfaces kept across frames when preallocated AHB textures are not in use.
+    mutable sk_sp<SkSurface> mCachedSurfaces[kMaxSurfaces];
+    mutable sk_sp<SkSurface> mCachedProtectedSurfaces[kMaxSurfaces];
 
     mutable std::atomic<bool> mSurfaceF16Unsupported{false};
     std::atomic<bool> mGraphicBufferF16Unsupported{false};

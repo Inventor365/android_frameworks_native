@@ -21,6 +21,8 @@
 #include <SkRuntimeEffect.h>
 #include <SkSurface.h>
 
+#include <string>
+
 #include "../compat/SkiaGpuContext.h"
 #include "RuntimeEffectManager.h"
 
@@ -62,10 +64,20 @@ public:
     void drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                                 const uint32_t blurRadius, const float zoomScale,
                                 const float blurAlpha, const SkRect& blurRect,
-                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input);
+                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input,
+                                int32_t material = 0);
 
     float getMaxCrossFadeRadius() const;
 
+    // How far beyond the region its glass rim refracts from, in region coordinates, so
+    // the blurred backdrop covers all refracted/dispersed samples without clamping artifacts.
+    float lensReach(const SkRRect& region, int32_t material) const;
+
+    // Refreshes cached lock-free Yuki's Addons glass/blur properties for the current frame.
+    void setDisplay(const std::string& namePlusId);
+
+    // Resolves whole-window blur material for known system layers (e.g. NotificationShade).
+    int32_t resolveWindowMaterial(const std::string& layerName) const;
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {
         return true;
@@ -78,6 +90,12 @@ private:
 
     // Optional blend used for crossfade only if mMaxCrossFadeRadius > 0
     const sk_sp<SkRuntimeEffect> mMixEffect;
+
+    // Yuki's Addons / PLEnhanced Liquid Glass & ColorOS Frosted Glass runtime effects
+    const sk_sp<SkRuntimeEffect> mLiquidGlassEffect;
+    const sk_sp<SkRuntimeEffect> mCosGlassEffect;
+    bool mGlassEnabled = false;
+    int32_t mGlobalStyle = 0;
 };
 
 } // namespace skia

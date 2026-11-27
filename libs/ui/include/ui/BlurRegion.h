@@ -39,6 +39,7 @@ struct BlurRegion {
     int top;
     int right;
     int bottom;
+    int32_t material = 0;
 
     inline bool operator==(const BlurRegion& other) const {
         return blurRadius == other.blurRadius && cornerRadiusTLX == other.cornerRadiusTLX &&
@@ -50,7 +51,7 @@ struct BlurRegion {
                 cornerRadiusBRX == other.cornerRadiusBRX &&
                 cornerRadiusBRY == other.cornerRadiusBRY && alpha == other.alpha &&
                 left == other.left && top == other.top && right == other.right &&
-                bottom == other.bottom;
+                bottom == other.bottom && material == other.material;
     }
 
     inline bool operator!=(const BlurRegion& other) const { return !(*this == other); }
@@ -81,6 +82,7 @@ static inline void PrintTo(const BlurRegion& blurRegion, ::std::ostream* os,
     *os << newline << ".top = " << blurRegion.top;
     *os << newline << ".right = " << blurRegion.right;
     *os << newline << ".bottom = " << blurRegion.bottom;
+    *os << newline << ".material = " << blurRegion.material;
     *os << IndentedNewline(currentIndent) << "}";
 }
 
@@ -104,7 +106,7 @@ struct hash<android::BlurRegion> {
                                     region.cornerRadiusTRY, region.cornerRadiusBLX,
                                     region.cornerRadiusBLY, region.cornerRadiusBRX,
                                     region.cornerRadiusBRY, region.alpha, region.left, region.top,
-                                    region.right, region.bottom);
+                                    region.right, region.bottom, region.material);
     }
 };
 } // namespace std

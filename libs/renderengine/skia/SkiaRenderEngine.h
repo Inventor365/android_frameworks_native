@@ -252,6 +252,7 @@ private:
 
     sp<Fence> mLastDrawFence;
     BlurFilter* mBlurFilter = nullptr;
+    sk_sp<SkSurface> mBlurInputCopySurface;
 
     // Object to capture commands send to Skia.
     std::unique_ptr<SkiaCapture> mCapture;

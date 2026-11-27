@@ -212,29 +212,6 @@ sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* co
     SkIRect targetBlurRect;
     blurRect.roundIn(&targetBlurRect);
 
-    auto makeSurface = [&](float scale) -> sk_sp<SkSurface> {
-        const int newW =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.width()) / scale));
-        const int newH =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.height()) / scale));
-        const SkImageInfo baseInfo = input->imageInfo().makeWH(newW, newH);
-
-        sk_sp<SkSurface> surface;
-        if (!mSurfaceF16Unsupported.load(std::memory_order_relaxed)) {
-            surface = context->createRenderTarget(baseInfo.makeColorType(kRGBA_F16_SkColorType));
-            if (!surface) {
-                ALOGI("KawaseBlurDualFilterV2: F16 blur surfaces not supported on this GPU, "
-                      "falling back to 8-bit");
-                mSurfaceF16Unsupported.store(true, std::memory_order_relaxed);
-            }
-        }
-        if (!surface) {
-            surface = context->createRenderTarget(baseInfo);
-        }
-        LOG_THREAD_STATE_AND_CRASH_IF(!surface, "%s: Failed to create surface for blurring!",
-                                      __func__);
-        return surface;
-    };
 
     auto makeImageInfo = [&](float scale) -> SkImageInfo {
         const int newW =
@@ -259,10 +236,42 @@ sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* co
     sk_sp<SkSurface> surfaces[kMaxSurfaces];
     SkImageInfo imageInfos[kMaxSurfaces];
     if (!usesPreallocatedTextures) {
+        // createRenderTarget surfaces are unbudgeted, so Skia frees them every frame. Keep
+        // surfaces sized for the whole input and blur into their top-left sub-rect, matching the
+        // preallocated path and eliminating per-frame GPU allocation stalls.
+        auto& cachedSurfaces = isProtected ? mCachedProtectedSurfaces : mCachedSurfaces;
+        const int baseWidth = std::max(input->width(), targetBlurRect.width());
+        const int baseHeight = std::max(input->height(), targetBlurRect.height());
+        const SkColorType targetColorType = mSurfaceF16Unsupported.load(std::memory_order_relaxed)
+                ? input->imageInfo().colorType()
+                : kRGBA_F16_SkColorType;
         for (int i = 0; i < kMaxSurfaces; i++) {
-            surfaces[i] = filterPasses >= i ? makeSurface(kScales[i]) : nullptr;
-            imageInfos[i] = surfaces[i] != nullptr ? surfaces[i]->imageInfo() : SkImageInfo();
+            if (filterPasses < i) {
+                continue;
+            }
+            const int surfW =
+                    std::max(1, static_cast<int>(static_cast<float>(baseWidth) / kScales[i]));
+            const int surfH =
+                    std::max(1, static_cast<int>(static_cast<float>(baseHeight) / kScales[i]));
+            const SkImageInfo desiredInfo =
+                    input->imageInfo().makeColorType(targetColorType).makeWH(surfW, surfH);
+            if (!cachedSurfaces[i] || cachedSurfaces[i]->imageInfo() != desiredInfo) {
+                sk_sp<SkSurface> surf = context->createRenderTarget(desiredInfo);
+                if (!surf && targetColorType == kRGBA_F16_SkColorType) {
+                    ALOGI("KawaseBlurDualFilterV2: F16 blur surfaces not supported on this GPU, "
+                          "falling back to 8-bit");
+                    mSurfaceF16Unsupported.store(true, std::memory_order_relaxed);
+                    surf = context->createRenderTarget(input->imageInfo().makeWH(surfW, surfH));
+                }
+                LOG_THREAD_STATE_AND_CRASH_IF(!surf, "%s: Failed to create surface for blurring!",
+                                              __func__);
+                cachedSurfaces[i] = std::move(surf);
+            }
+            surfaces[i] = cachedSurfaces[i];
+            imageInfos[i] = makeImageInfo(kScales[i]).makeColorType(
+                    surfaces[i]->imageInfo().colorType());
         }
+        usesPreallocatedTextures = true;
     } else {
         for (int i = 0; i < kMaxSurfaces; i++) {
             surfaces[i] = preallocatedTexturesRef[i]->getOrCreateSurface(display.outputDataspace);

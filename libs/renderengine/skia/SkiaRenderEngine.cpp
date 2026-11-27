@@ -366,6 +366,7 @@ SkiaRenderEngine::~SkiaRenderEngine() { }
 void SkiaRenderEngine::finishRenderingAndAbandonContexts() {
     std::lock_guard<std::mutex> lock(mRenderingMutex);
 
+    mBlurInputCopySurface.reset();
     if (mBlurFilter) {
         delete mBlurFilter;
     }
@@ -918,6 +919,9 @@ void SkiaRenderEngine::drawLayersInternal(
     auto context = getActiveContext();
     LOG_ALWAYS_FATAL_IF(context->isAbandonedOrDeviceLost(),
                         "Context is abandoned/device lost at start of %s", __func__);
+    if (mBlurFilter) {
+        mBlurFilter->setDisplay(display.namePlusId);
+    }
 
     // Only dump settings on crashes that occur after the more specific validations above, which
     // aren't affected by the settings logged here.
@@ -1147,10 +1151,26 @@ void SkiaRenderEngine::drawLayersInternal(
                         }
                     }
                     if (requiresCrossFadeWithBlurInput) {
-                        // If we require cross fading with the blur input, we need to make sure we
-                        // make a copy of the surface to the image since we will be writing to the
-                        // surface while sampling the blurInput.
-                        blurInput = activeSurface->makeImageSnapshot();
+                        // Copy into a persistent surface across frames to avoid CoW full-screen
+                        // snapshot stalls during smooth blur crossfade transitions.
+                        if (!mBlurInputCopySurface ||
+                            mBlurInputCopySurface->imageInfo() != activeSurface->imageInfo() ||
+                            mBlurInputCopySurface->recordingContext() !=
+                                    activeSurface->recordingContext()) {
+                            mBlurInputCopySurface =
+                                    activeSurface->makeSurface(activeSurface->imageInfo());
+                        }
+                        if (mBlurInputCopySurface) {
+                            SkPaint copyPaint;
+                            copyPaint.setBlendMode(SkBlendMode::kSrc);
+                            SkCanvas* copyCanvas = mBlurInputCopySurface->getCanvas();
+                            copyCanvas->restoreToCount(1);
+                            copyCanvas->drawImage(activeSurface->makeTemporaryImage(), 0, 0,
+                                                  SkSamplingOptions(), &copyPaint);
+                            blurInput = mBlurInputCopySurface->makeTemporaryImage();
+                        } else {
+                            blurInput = activeSurface->makeImageSnapshot();
+                        }
                     } else {
                         blurInput = activeSurface->makeTemporaryImage();
                     }
@@ -1159,68 +1179,87 @@ void SkiaRenderEngine::drawLayersInternal(
                 sk_sp<SkImage> temporaryBlurredImage = nullptr; // Might be reused by blur regions.
                 if (layer.backgroundBlurRadius > 0) {
                     SFTRACE_NAME("BackgroundBlur");
-                    // Result is only valid until the next call to generateTemporaryImage (for a
-                    // given BlurFilter). Safe to invalidate after all desired drawBlurRegion
-                    // invocations have been made for a particular blurred SkImage.
                     temporaryBlurredImage =
                             mBlurFilter->generateTemporaryImage(context, display,
                                                                 layer.backgroundBlurRadius,
                                                                 blurInput, blurRect);
 
+                    const int32_t material = mBlurFilter->resolveWindowMaterial(layer.name);
                     mBlurFilter->drawBlurRegion(canvas, bounds, layer.backgroundBlurRadius,
                                                 layer.backgroundBlurScale, 1.0f, blurRect,
-                                                temporaryBlurredImage, blurInput);
+                                                temporaryBlurredImage, blurInput, material);
                 }
 
                 if (layer.blurRegions.size()) {
                     SkAutoCanvasRestore acr(canvas, true);
                     canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
 
-                    // Clustering regions by blur radius allows regions with a shared blur radius to
-                    // reuse the same result from generateTemporaryImage(...). The exact order does
-                    // not matter. Initial sizes for ftl stack-first collections were chosen
-                    // semi-arbitrarily.
+                    // Cluster regions by blur radius; sort backdrop panels (5, 6, 12, 15) before
+                    // foreground slabs/tiles/cards so overlays always composite cleanly on top.
+                    auto isBackdropPanel = [](int32_t mat) {
+                        return mat == 5 || mat == 6 || mat == 12 || mat == 15;
+                    };
                     using BlurRegionList = ftl::SmallVector<BlurRegion, 4>;
                     ftl::SmallMap<uint32_t, BlurRegionList, 2> regionsPerRadius;
-                    for (const BlurRegion& region : layer.blurRegions) {
-                        if (region.blurRadius > 0) {
-                            const auto& [entry, _] = regionsPerRadius.try_emplace(region.blurRadius,
-                                                                                  BlurRegionList());
-                            entry->second.push_back(region);
+                    for (const bool panel : {true, false}) {
+                        for (const BlurRegion& region : layer.blurRegions) {
+                            if (region.blurRadius > 0 &&
+                                isBackdropPanel(region.material) == panel) {
+                                const auto& [entry, _] = regionsPerRadius.try_emplace(
+                                        region.blurRadius, BlurRegionList());
+                                entry->second.push_back(region);
+                            }
                         }
                     }
 
                     const auto drawRegion =
-                            [this, canvas, &blurRect,
+                            [this, canvas,
                              &blurInput](const sk_sp<SkImage>& temporaryBlurredImage,
-                                         const BlurRegion& region) {
+                                         const SkRect& blurredRect, const BlurRegion& region) {
                                 mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
                                                             region.blurRadius, 1.0f, region.alpha,
-                                                            blurRect, temporaryBlurredImage,
-                                                            blurInput);
+                                                            blurredRect, temporaryBlurredImage,
+                                                            blurInput, region.material);
                             };
 
                     // Reuse existing temporaryBlurredImage from background blur for any regions
-                    // with the same blur radius.
+                    // with the same blur radius (zero extra Kawase blur passes).
                     if (temporaryBlurredImage != nullptr &&
                         regionsPerRadius.contains(layer.backgroundBlurRadius)) {
                         for (const BlurRegion& region :
                              regionsPerRadius.get(layer.backgroundBlurRadius)->get()) {
-                            drawRegion(temporaryBlurredImage, region);
+                            drawRegion(temporaryBlurredImage, blurRect, region);
                         }
                         regionsPerRadius.erase(layer.backgroundBlurRadius);
                     }
 
-                    // Draw remaining regions for each blur radius.
+                    // Draw remaining regions for each distinct blur radius, restricting the blur
+                    // pass to the union of region bounds outset by max(blurMargin, lensReach).
                     for (const auto& [radius, regions] : regionsPerRadius) {
+                        SkRect regionsRect = SkRect::MakeEmpty();
+                        const float margin = canvas->getTotalMatrix().mapRadius(radius);
+                        for (const BlurRegion& region : regions) {
+                            const SkRRect rrect = getBlurRRect(region);
+                            SkRect rect = canvas->getTotalMatrix().mapRect(rrect.rect());
+                            const float reach = canvas->getTotalMatrix().mapRadius(
+                                    mBlurFilter->lensReach(rrect, region.material));
+                            const float outset = std::max(margin, reach);
+                            rect.outset(outset, outset);
+                            regionsRect.join(rect);
+                        }
+                        SkRect regionsBlurRect = blurRect;
+                        if (!regionsBlurRect.intersect(regionsRect)) {
+                            continue;
+                        }
                         {
                             SFTRACE_NAME("BlurRegion");
                             temporaryBlurredImage =
                                     mBlurFilter->generateTemporaryImage(context, display, radius,
-                                                                        blurInput, blurRect);
+                                                                        blurInput,
+                                                                        regionsBlurRect);
                         }
                         for (const BlurRegion& region : regions) {
-                            drawRegion(temporaryBlurredImage, region);
+                            drawRegion(temporaryBlurredImage, regionsBlurRect, region);
                         }
                     }
                 }
