@@ -372,7 +372,7 @@ private:
 };
 
 static bool propGlassEnabled() {
-    static CachedIntProperty prop("persist.sys.yuki.glass.enabled", 1);
+    static CachedIntProperty prop("persist.sys.yuki.glass.enabled", 0);
     return prop.get() != 0;
 }
 
